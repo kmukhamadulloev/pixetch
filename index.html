@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Editor</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+    <link rel="stylesheet" href="./styles/styles.css">
+</head> 
+<body>
+    <div class="toolbar">
+        <div class="tool-group">
+            <button id="pencil" class="tool active"><span class="fas fa-pencil"></span></button>
+            <button id="brush" class="tool"><span class="fas fa-brush"></span></button>
+            <button id="fill" class="tool"><span class="fas fa-bucket"></span></button>
+            <button id="eraser" class="tool secondary"><span class="fas fa-eraser"></span></button>
+        </div>
+        <div class="tool-group">
+            <input type="color" class="color-picker" id="color-picker-0">
+            <input type="color" class="color-picker" id="color-picker-1">
+            <input type="color" class="color-picker" id="color-picker-2">
+            <input type="color" class="color-picker" id="color-picker-3">
+            <input type="color" class="color-picker" id="color-picker-4">
+            <input type="color" class="color-picker" id="color-picker-5">
+            <input type="color" class="color-picker" id="color-picker-6">
+            <input type="color" class="color-picker" id="color-picker-7">
+            <input type="color" class="color-picker" id="color-picker-8">
+            <input type="color" class="color-picker" id="color-picker-9">
+        </div>
+        <div class="tool-group">
+            <button id="undo" class="tool"><span class="fas fa-undo"></span></button>
+            <button id="redo" class="tool"><span class="fas fa-redo"></span></button>
+            <button id="export" class="tool"><span class="fas fa-download"></span></button>
+            <button id="config" class="tool"><span class="fas fa-file"></span></button>
+        </div>
+    </div>
+    <div class="layers-panel">
+        <div class="layers-header">
+            <h3>Layers</h3>
+            <button id="add-layer" class="tool"><span class="fas fa-plus"></span></button>
+        </div>
+        <div class="layers-list" id="layers-list">
+            <!-- Layers will be added here dynamically -->
+        </div>
+    </div>
+
+    <div class="history-panel">
+        <div class="history-header">
+            <h3>History</h3>
+        </div>
+        <div id="history-list" class="history-list"></div>
+    </div>
+
+    <div class="canvas-container">
+        <!-- Canvases will be created dynamically -->
+    </div>
+
+    <!-- Layer Name Edit Modal -->
+    <div id="layer-name-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Edit Layer Name</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="text" id="layer-name-input" placeholder="Enter layer name">
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-rename" class="btn btn-secondary">Cancel</button>
+                <button id="save-rename" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Configuration Modal -->
+    <div id="config-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Canvas Configuration</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="config-group">
+                    <label for="pixel-size">Pixel Size:</label>
+                    <input type="number" id="pixel-size" min="1" max="50" value="10">
+                </div>
+                <div class="config-group">
+                    <label for="canvas-width">Canvas Width:</label>
+                    <input type="number" id="canvas-width" min="1" max="2000" value="1280">
+                </div>
+                <div class="config-group">
+                    <label for="canvas-height">Canvas Height:</label>
+                    <input type="number" id="canvas-height" min="1" max="2000" value="650">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-config" class="btn btn-secondary">Cancel</button>
+                <button id="save-config" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="./scripts/editor.js"></script>
+</body>
+</html>
