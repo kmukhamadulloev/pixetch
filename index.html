@@ -13,7 +13,7 @@
             <button id="pencil" class="tool active"><span class="fas fa-pencil"></span></button>
             <button id="brush" class="tool"><span class="fas fa-brush"></span></button>
             <button id="fill" class="tool"><span class="fas fa-bucket"></span></button>
-            <button id="eraser" class="tool secondary"><span class="fas fa-eraser"></span></button>
+            <button id="eraser" class="tool"><span class="fas fa-eraser"></span></button>
         </div>
         <div class="tool-group">
             <input type="color" class="color-picker" id="color-picker-0">
@@ -31,13 +31,16 @@
             <button id="undo" class="tool"><span class="fas fa-undo"></span></button>
             <button id="redo" class="tool"><span class="fas fa-redo"></span></button>
             <button id="export" class="tool"><span class="fas fa-download"></span></button>
-            <button id="config" class="tool"><span class="fas fa-file"></span></button>
+            <button id="config" class="tool"><span class="fas fa-cog"></span></button>
         </div>
     </div>
     <div class="layers-panel">
         <div class="layers-header">
             <h3>Layers</h3>
-            <button id="add-layer" class="tool"><span class="fas fa-plus"></span></button>
+            <div class="layers-header-actions">
+                <button id="merge-layer" class="tool" title="Merge active layer down"><span class="fas fa-layer-group"></span></button>
+                <button id="add-layer" class="tool" title="Add layer"><span class="fas fa-plus"></span></button>
+            </div>
         </div>
         <div class="layers-list" id="layers-list">
             <!-- Layers will be added here dynamically -->
@@ -86,16 +89,98 @@
                 </div>
                 <div class="config-group">
                     <label for="canvas-width">Canvas Width:</label>
-                    <input type="number" id="canvas-width" min="1" max="2000" value="1280">
+                    <input type="number" id="canvas-width" min="1" max="2000" value="350">
                 </div>
                 <div class="config-group">
                     <label for="canvas-height">Canvas Height:</label>
-                    <input type="number" id="canvas-height" min="1" max="2000" value="650">
+                    <input type="number" id="canvas-height" min="1" max="2000" value="350">
+                </div>
+                <div class="config-group">
+                    <label>Resize Anchor:</label>
+                    <div id="resize-anchor" class="anchor-grid" aria-label="Resize anchor selector">
+                        <button type="button" class="anchor-point" data-anchor="top-left" aria-label="Top left"></button>
+                        <button type="button" class="anchor-point" data-anchor="top-center" aria-label="Top center"></button>
+                        <button type="button" class="anchor-point" data-anchor="top-right" aria-label="Top right"></button>
+                        <button type="button" class="anchor-point" data-anchor="middle-left" aria-label="Middle left"></button>
+                        <button type="button" class="anchor-point active" data-anchor="middle-center" aria-label="Middle center"></button>
+                        <button type="button" class="anchor-point" data-anchor="middle-right" aria-label="Middle right"></button>
+                        <button type="button" class="anchor-point" data-anchor="bottom-left" aria-label="Bottom left"></button>
+                        <button type="button" class="anchor-point" data-anchor="bottom-center" aria-label="Bottom center"></button>
+                        <button type="button" class="anchor-point" data-anchor="bottom-right" aria-label="Bottom right"></button>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
                 <button id="cancel-config" class="btn btn-secondary">Cancel</button>
                 <button id="save-config" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="color-edit-modal" class="modal">
+        <div class="modal-content modal-content-color">
+            <div class="modal-header">
+                <h3>Edit Palette Color</h3>
+                <button class="close-modal">&times;</button>
+            </div>
+            <div class="modal-body color-modal-body">
+                <div class="color-picker-layout">
+                    <div class="color-surface-wrap">
+                        <div id="color-surface" class="color-surface" aria-label="Color surface">
+                            <div id="color-surface-cursor" class="color-surface-cursor"></div>
+                        </div>
+                    </div>
+                    <div class="color-sidebar">
+                        <div class="color-preview-grid">
+                            <div class="color-preview-card">
+                                <span>Current</span>
+                                <div id="color-preview-current" class="color-preview-swatch"></div>
+                            </div>
+                            <div class="color-preview-card">
+                                <span>New</span>
+                                <div id="color-preview-next" class="color-preview-swatch"></div>
+                            </div>
+                        </div>
+                        <div class="color-slider-group">
+                            <label for="color-hue">Hue</label>
+                            <input type="range" id="color-hue" min="0" max="360" value="0">
+                        </div>
+                        <div class="color-slider-group">
+                            <label for="color-alpha">Alpha</label>
+                            <input type="range" id="color-alpha" min="0" max="100" value="100">
+                        </div>
+                    </div>
+                </div>
+                <div class="color-field-grid">
+                    <label class="color-field">
+                        <span>Hex</span>
+                        <input type="text" id="color-hex" maxlength="7" value="#000000">
+                    </label>
+                    <label class="color-field">
+                        <span>Alpha</span>
+                        <input type="number" id="color-alpha-input" min="0" max="255" value="255">
+                    </label>
+                    <label class="color-field">
+                        <span>R</span>
+                        <input type="number" id="color-r" min="0" max="255" value="0">
+                    </label>
+                    <label class="color-field">
+                        <span>G</span>
+                        <input type="number" id="color-g" min="0" max="255" value="0">
+                    </label>
+                    <label class="color-field">
+                        <span>B</span>
+                        <input type="number" id="color-b" min="0" max="255" value="0">
+                    </label>
+                    <label class="color-field">
+                        <span>Opacity %</span>
+                        <input type="number" id="color-opacity-input" min="0" max="100" value="100">
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-color-edit" class="btn btn-secondary">Cancel</button>
+                <button id="save-color-edit" class="btn btn-primary">Save</button>
             </div>
         </div>
     </div>

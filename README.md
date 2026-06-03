@@ -7,7 +7,7 @@ Pixetch is a free, open-source pixel art editor that allows you to create pixel 
 - **Multiple Drawing Tools**: Pencil, brush, fill bucket, and eraser
 - **Layer System**: Work with multiple layers for complex compositions
 - **Color Palette**: Customize your color palette with up to 10 colors
-- **Undo/Redo**: Never lose your work with unlimited undo/redo functionality
+- **Undo/Redo**: Step backward and forward through recent edits with memory-aware history management
 - **Export**: Save your artwork in various formats
 - **Customizable Canvas**: Adjust canvas size and pixel size to fit your needs
 - **History Panel**: Track your changes and revert to previous states

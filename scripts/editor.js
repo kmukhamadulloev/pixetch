@@ -5,6 +5,9 @@ class CanvasLayer {
     constructor(id, scaleFactor, width, height, fill = null) {
         this.canvas = document.getElementById(id);
         this.id = id;
+        this.scaleFactor = scaleFactor;
+        this.logicalWidth = width;
+        this.logicalHeight = height;
         this.canvas.width = width;
         this.canvas.height = height;
         this.ctx = this.canvas.getContext('2d');
@@ -25,7 +28,7 @@ class CanvasLayer {
     }
 
     clear() {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.clearRect(0, 0, this.logicalWidth, this.logicalHeight);
     }
 
     drawPixel(x, y, color = '#000') {
@@ -38,14 +41,17 @@ class CanvasLayer {
     }
 
     drawGrid(scaleFactor) {
-        const oldFill = this.ctx.fillStyle;
+        this.ctx.save();
+        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
         this.ctx.fillStyle = '#888';
-        for (let i = 0; i < this.canvas.width / scaleFactor; i++) {
-            for (let j = 0; j < this.canvas.height / scaleFactor; j++) {
-                this.ctx.fillRect(i, j, 0.1, 0.1);
+
+        for (let x = 0; x < this.canvas.width; x += scaleFactor) {
+            for (let y = 0; y < this.canvas.height; y += scaleFactor) {
+                this.ctx.fillRect(x, y, 1, 1);
             }
         }
-        this.ctx.fillStyle = oldFill;
+
+        this.ctx.restore();
     }
 
     setVisibility(visible) {
@@ -65,6 +71,15 @@ class CanvasLayer {
         this.name = name;
         this.canvas.setAttribute('data-canvas-name', name);
     }
+
+    drawCanvasContent(sourceCanvas, offsetX = 0, offsetY = 0) {
+        this.ctx.save();
+        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        this.ctx.imageSmoothingEnabled = false;
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.drawImage(sourceCanvas, offsetX, offsetY);
+        this.ctx.restore();
+    }
 }
 
 /**
@@ -75,21 +90,33 @@ class HistoryManager {
         this.history = [];
         this.currentIndex = -1;
         this.maxHistory = 50;
+        this.maxHistoryBytes = 64 * 1024 * 1024;
+        this.currentBytes = 0;
         this.historyList = document.getElementById('history-list');
     }
 
     reset() {
         this.history = [];
         this.currentIndex = -1;
+        this.currentBytes = 0;
         this.historyList.innerHTML = '';
     }
 
     addHistoryItem(action) {
         const item = document.createElement('div');
         item.className = 'history-item';
+        item.dataset.historyIndex = String(this.history.length - 1);
         
         const icon = this.getActionIcon(action);
         item.innerHTML = `<i class="fas ${icon}"></i><span>${action}</span>`;
+        item.onclick = () => {
+            const index = Number(item.dataset.historyIndex);
+            if (index > this.currentIndex) return;
+            const state = this.jumpToState(index);
+            if (state && this.onStateSelected) {
+                this.onStateSelected(state);
+            }
+        };
 
         this.historyList.appendChild(item);
         this.updateHistoryPanel();
@@ -109,6 +136,7 @@ class HistoryManager {
         
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
+            item.dataset.historyIndex = String(i);
             item.classList.toggle('active', i === this.currentIndex);
             item.classList.toggle('disabled', i > this.currentIndex);
             item.style.cursor = i > this.currentIndex ? 'not-allowed' : 'pointer';
@@ -129,6 +157,10 @@ class HistoryManager {
     }
 
     clearFutureStates() {
+        const futureStates = this.history.slice(this.currentIndex + 1);
+        futureStates.forEach(state => {
+            this.currentBytes -= state.sizeBytes || 0;
+        });
         this.history = this.history.slice(0, this.currentIndex + 1);
         
         const items = this.historyList.children;
@@ -137,16 +169,22 @@ class HistoryManager {
         }
     }
 
-    pushState(state, action = 'Drawing') {
+    pushState(state, action = 'Drawing', sizeBytes = 0) {
         if (this.currentIndex < this.history.length - 1) {
             this.clearFutureStates();
         }
 
+        state.sizeBytes = sizeBytes;
         this.history.push(state);
         this.currentIndex++;
+        this.currentBytes += sizeBytes;
 
-        if (this.history.length > this.maxHistory) {
-            this.history.shift();
+        while (
+            this.history.length > this.maxHistory ||
+            (this.currentBytes > this.maxHistoryBytes && this.history.length > 1)
+        ) {
+            const removedState = this.history.shift();
+            this.currentBytes -= removedState.sizeBytes || 0;
             this.currentIndex--;
             this.historyList.removeChild(this.historyList.firstChild);
         }
@@ -192,10 +230,13 @@ class CanvasController {
         this.translateX = 0;
         this.translateY = 0;
         this.isDragging = false;
+        this.spacePressed = false;
+        this.boundHandlers = {};
 
         this.centerCanvas();
         this.initZoom();
         this.initPan();
+        this.initKeyboardPan();
     }
 
     centerCanvas() {
@@ -227,7 +268,7 @@ class CanvasController {
     }
 
     initZoom() {
-        this.container.addEventListener('wheel', e => {
+        this.boundHandlers.wheel = e => {
             e.preventDefault();
             const rect = this.container.getBoundingClientRect();
             const mouseX = e.clientX - rect.left;
@@ -242,33 +283,83 @@ class CanvasController {
 
             this.scale = newScale;
             this.updateTransform();
-        });
+        };
+
+        this.container.addEventListener('wheel', this.boundHandlers.wheel);
     }
 
     initPan() {
-        this.container.addEventListener('mousedown', e => {
-            if (e.button === 1) {
+        this.boundHandlers.mouseDown = e => {
+            if (e.button === 1 || (e.button === 0 && this.spacePressed)) {
                 this.isDragging = true;
                 this.startX = e.clientX - this.translateX;
                 this.startY = e.clientY - this.translateY;
                 this.container.classList.add('dragging');
                 e.preventDefault();
             }
-        });
+        };
+        this.container.addEventListener('mousedown', this.boundHandlers.mouseDown);
 
-        ['mouseup', 'mouseleave'].forEach(evt =>
-            this.container.addEventListener(evt, () => {
+        this.boundHandlers.stopDrag = () => {
                 this.isDragging = false;
                 this.container.classList.remove('dragging');
-            })
+            };
+        ['mouseup', 'mouseleave'].forEach(evt =>
+            this.container.addEventListener(evt, this.boundHandlers.stopDrag)
         );
 
-        this.container.addEventListener('mousemove', e => {
+        this.boundHandlers.mouseMove = e => {
             if (!this.isDragging) return;
             this.translateX = e.clientX - this.startX;
             this.translateY = e.clientY - this.startY;
             this.updateTransform();
-        });
+        };
+        this.container.addEventListener('mousemove', this.boundHandlers.mouseMove);
+    }
+
+    initKeyboardPan() {
+        this.boundHandlers.keyDown = e => {
+            if (e.code === 'Space' && !this.isTypingInField(e.target)) {
+                this.spacePressed = true;
+                this.container.classList.add('space-pan');
+                e.preventDefault();
+            }
+        };
+        document.addEventListener('keydown', this.boundHandlers.keyDown);
+
+        this.boundHandlers.keyUp = e => {
+            if (e.code === 'Space') {
+                this.spacePressed = false;
+                this.container.classList.remove('space-pan');
+            }
+        };
+        document.addEventListener('keyup', this.boundHandlers.keyUp);
+
+        this.boundHandlers.blur = () => {
+            this.spacePressed = false;
+            this.isDragging = false;
+            this.container.classList.remove('space-pan', 'dragging');
+        };
+        window.addEventListener('blur', this.boundHandlers.blur);
+    }
+
+    isTypingInField(target) {
+        return target instanceof HTMLElement &&
+            (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.isContentEditable);
+    }
+
+    destroy() {
+        this.container.removeEventListener('wheel', this.boundHandlers.wheel);
+        this.container.removeEventListener('mousedown', this.boundHandlers.mouseDown);
+        this.container.removeEventListener('mousemove', this.boundHandlers.mouseMove);
+        ['mouseup', 'mouseleave'].forEach(evt =>
+            this.container.removeEventListener(evt, this.boundHandlers.stopDrag)
+        );
+        document.removeEventListener('keydown', this.boundHandlers.keyDown);
+        document.removeEventListener('keyup', this.boundHandlers.keyUp);
+        window.removeEventListener('blur', this.boundHandlers.blur);
     }
 }
 
@@ -284,6 +375,7 @@ class CanvasLayerManager {
         this.activeLayer = this.drawableLayers[0];
         this.nextLayerId = this.drawableLayers.length;
         this.historyManager = new HistoryManager();
+        this.historyManager.onStateSelected = state => this.restoreState(state);
         
         if (!skipInitialState) {
             this.saveState('Initial State');
@@ -291,6 +383,7 @@ class CanvasLayerManager {
         
         this.initLayersList();
         this.initAddLayerButton();
+        this.initMergeLayerButton();
         this.initUndoRedo();
         this.initLayerNameModal();
         this.initExportButton();
@@ -323,10 +416,10 @@ class CanvasLayerManager {
             this.nameInput.value = '';
         };
 
-        document.querySelector('.close-modal').addEventListener('click', closeModal);
-        document.getElementById('cancel-rename').addEventListener('click', closeModal);
+        this.modal.querySelector('.close-modal').onclick = closeModal;
+        document.getElementById('cancel-rename').onclick = closeModal;
 
-        document.getElementById('save-rename').addEventListener('click', () => {
+        document.getElementById('save-rename').onclick = () => {
             if (this.currentEditingLayer) {
                 const newName = this.nameInput.value.trim();
                 if (newName) {
@@ -336,19 +429,19 @@ class CanvasLayerManager {
                 }
             }
             closeModal();
-        });
+        };
 
-        this.modal.addEventListener('click', (e) => {
+        this.modal.onclick = e => {
             if (e.target === this.modal) {
                 closeModal();
             }
-        });
+        };
 
-        this.nameInput.addEventListener('keypress', (e) => {
+        this.nameInput.onkeypress = e => {
             if (e.key === 'Enter') {
                 document.getElementById('save-rename').click();
             }
-        });
+        };
     }
 
     getNextLayerName() {
@@ -363,13 +456,20 @@ class CanvasLayerManager {
     }
 
     saveState(action = 'Drawing', layer = null) {
+        let stateBytes = 0;
         const state = {
-            layers: this.drawableLayers.map(layer => ({
-                id: layer.id,
-                imageData: layer.getImageData(),
-                visible: layer.visible,
-                name: layer.name
-            })),
+            canvasSize: [...this.canvasSize],
+            layers: this.drawableLayers.map(layer => {
+                const imageData = layer.getImageData();
+                stateBytes += imageData.data.byteLength;
+
+                return {
+                    id: layer.id,
+                    imageData,
+                    visible: layer.visible,
+                    name: layer.name
+                };
+            }),
             activeLayerId: this.activeLayer.id
         };
 
@@ -377,15 +477,20 @@ class CanvasLayerManager {
         if (layer) {
             actionText = `${action} on "${layer.name}"`;
         }
-        this.historyManager.pushState(state, actionText);
+        this.historyManager.pushState(state, actionText, stateBytes);
     }
 
     restoreState(state) {
         if (!state) return;
 
+        if (state.canvasSize) {
+            this.canvasSize = [...state.canvasSize];
+        }
+
         this.cleanupExistingLayers();
         this.restoreLayersFromState(state);
         this.updateLayerZIndices();
+        this.syncNextLayerId();
         this.initLayersList();
     }
 
@@ -442,6 +547,7 @@ class CanvasLayerManager {
         const layerId = `layer${this.nextLayerId}`;
         if (document.getElementById(layerId)) {
             console.error(`Layer with ID ${layerId} already exists`);
+            this.nextLayerId++;
             return null;
         }
 
@@ -456,6 +562,76 @@ class CanvasLayerManager {
         this.saveState('Create new', newLayer);
         
         return newLayer;
+    }
+
+    captureArtworkSnapshot() {
+        return {
+            canvasSize: [...this.canvasSize],
+            layers: this.drawableLayers.map(layer => {
+                const snapshotCanvas = document.createElement('canvas');
+                snapshotCanvas.width = layer.canvas.width;
+                snapshotCanvas.height = layer.canvas.height;
+                const snapshotCtx = snapshotCanvas.getContext('2d');
+                snapshotCtx.imageSmoothingEnabled = false;
+                snapshotCtx.drawImage(layer.canvas, 0, 0);
+
+                return {
+                    id: layer.id,
+                    name: layer.name,
+                    visible: layer.visible,
+                    canvas: snapshotCanvas
+                };
+            }),
+            activeLayerId: this.activeLayer?.id || null
+        };
+    }
+
+    restoreArtworkSnapshot(snapshot, anchor = 'middle-center') {
+        if (!snapshot?.layers?.length) return;
+
+        this.cleanupExistingLayers();
+        const [oldWidth, oldHeight] = snapshot.canvasSize || this.canvasSize;
+        const [offsetX, offsetY] = this.getAnchorOffset(
+            anchor,
+            oldWidth,
+            oldHeight,
+            this.canvasSize[0],
+            this.canvasSize[1]
+        );
+
+        snapshot.layers.forEach(layerState => {
+            this.createCanvasFromState(layerState);
+            const layer = new CanvasLayer(layerState.id, this.scaleFactor, ...this.canvasSize);
+            layer.setName(layerState.name);
+            layer.setVisibility(layerState.visible);
+            layer.drawCanvasContent(layerState.canvas, offsetX, offsetY);
+            this.drawableLayers.push(layer);
+        });
+
+        const activeLayer = this.drawableLayers.find(layer => layer.id === snapshot.activeLayerId);
+        this.activeLayer = activeLayer || this.drawableLayers[this.drawableLayers.length - 1];
+        this.updateLayerZIndices();
+        this.syncNextLayerId();
+        this.initLayersList();
+        this.clearHistory();
+    }
+
+    getAnchorOffset(anchor, oldWidth, oldHeight, newWidth, newHeight) {
+        const horizontalMap = {
+            left: 0,
+            center: Math.round((newWidth - oldWidth) / 2),
+            right: newWidth - oldWidth
+        };
+        const verticalMap = {
+            top: 0,
+            middle: Math.round((newHeight - oldHeight) / 2),
+            bottom: newHeight - oldHeight
+        };
+        const [vertical = 'middle', horizontal = 'center'] = anchor.split('-');
+        return [
+            horizontalMap[horizontal] ?? horizontalMap.center,
+            verticalMap[vertical] ?? verticalMap.middle
+        ];
     }
 
     createNewCanvas(layerId) {
@@ -474,7 +650,14 @@ class CanvasLayerManager {
     initAddLayerButton() {
         const addButton = document.getElementById('add-layer');
         if (addButton) {
-            addButton.addEventListener('click', () => this.createNewLayer());
+            addButton.onclick = () => this.createNewLayer();
+        }
+    }
+
+    initMergeLayerButton() {
+        const mergeButton = document.getElementById('merge-layer');
+        if (mergeButton) {
+            mergeButton.onclick = () => this.mergeActiveLayerDown();
         }
     }
 
@@ -590,6 +773,36 @@ class CanvasLayerManager {
         this.saveState('Deleted layer', layer);
     }
 
+    mergeActiveLayerDown() {
+        if (!this.activeLayer) return;
+
+        const activeIndex = this.drawableLayers.indexOf(this.activeLayer);
+        if (activeIndex <= 0) {
+            alert('Select a layer above another layer to merge down');
+            return;
+        }
+
+        const sourceLayer = this.activeLayer;
+        const targetLayer = this.drawableLayers[activeIndex - 1];
+
+        targetLayer.ctx.save();
+        targetLayer.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        targetLayer.ctx.imageSmoothingEnabled = false;
+        targetLayer.ctx.drawImage(sourceLayer.canvas, 0, 0);
+        targetLayer.ctx.restore();
+
+        const sourceCanvas = document.getElementById(sourceLayer.id);
+        if (sourceCanvas) {
+            sourceCanvas.remove();
+        }
+
+        this.drawableLayers.splice(activeIndex, 1);
+        this.setActiveLayer(targetLayer);
+        this.updateLayerZIndices();
+        this.initLayersList();
+        this.saveState('Merged layer', targetLayer);
+    }
+
     setActiveLayer(layer) {
         this.activeLayer = layer;
         
@@ -627,42 +840,42 @@ class CanvasLayerManager {
         const redoButton = document.getElementById('redo');
 
         if (undoButton) {
-            undoButton.addEventListener('click', () => {
+            undoButton.onclick = () => {
                 const state = this.historyManager.undo();
                 if (state) {
                     this.restoreState(state);
                 }
-            });
+            };
         }
 
         if (redoButton) {
-            redoButton.addEventListener('click', () => {
+            redoButton.onclick = () => {
                 const state = this.historyManager.redo();
                 if (state) {
                     this.restoreState(state);
                 }
-            });
+            };
         }
     }
 
     initExportButton() {
         const exportButton = document.getElementById('export');
         if (exportButton) {
-            exportButton.addEventListener('click', () => this.exportActiveLayer());
+            exportButton.onclick = () => this.exportImage();
         }
     }
 
-    exportActiveLayer() {
-        if (!this.activeLayer) return;
-
-        // Create a temporary canvas to handle the export
+    exportImage() {
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = this.canvasSize[0];
         tempCanvas.height = this.canvasSize[1];
         const tempCtx = tempCanvas.getContext('2d');
 
-        // Draw the active layer onto the temporary canvas
-        tempCtx.drawImage(this.activeLayer.canvas, 0, 0);
+        this.drawableLayers.forEach(layer => {
+            if (layer.visible) {
+                tempCtx.drawImage(layer.canvas, 0, 0);
+            }
+        });
 
         // Generate filename with timestamp
         const now = new Date();
@@ -685,6 +898,19 @@ class CanvasLayerManager {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+    }
+
+    clearHistory() {
+        this.historyManager.reset();
+        this.saveState('Initial State');
+    }
+
+    syncNextLayerId() {
+        const maxLayerNumber = this.drawableLayers.reduce((max, layer) => {
+            const match = layer.id.match(/(\d+)$/);
+            return match ? Math.max(max, Number(match[1]) + 1) : max;
+        }, 1);
+        this.nextLayerId = maxLayerNumber;
     }
 }
 
@@ -735,8 +961,17 @@ class DrawingTool {
         const activeLayer = this.layerManager.getActiveLayer();
         if (!activeLayer || !activeLayer.visible || !activeLayer.ctx) return;
 
-        const method = erasing ? 'clearPixel' : 'drawPixel';
-        activeLayer[method](x, y, this.color);
+        if (erasing) {
+            activeLayer.clearPixel(x, y);
+            return;
+        }
+
+        if (this.tool === 'brush') {
+            this.drawBrushStroke(activeLayer, x, y);
+            return;
+        }
+
+        activeLayer.drawPixel(x, y, this.color);
     }
 
     initListeners() {
@@ -750,39 +985,14 @@ class DrawingTool {
 
     handleMouseDown(e) {
         if (e.button !== 0 && e.button !== 2) return;
+        if (this.controller.spacePressed) return;
         const { translateX, translateY, scale } = this.controller.getTransform();
         const [x, y] = this.getCanvasCoordinates(e, translateX, translateY, scale);
-        
-        /*if (this.tool === 'fill') {
-            const activeLayer = this.layerManager.getActiveLayer();
-            const imageData = activeLayer.getImageData();
-            const pixels = imageData.data;
-            const pos = (y * activeLayer.canvas.width + x) * 4;
-            
-            // Get the color of the clicked pixel
-            const targetColor = this.rgbToHex(
-                pixels[pos],
-                pixels[pos + 1],
-                pixels[pos + 2]
-            );
-            
-            this.floodFill(x, y, targetColor, this.color);
-            this.layerManager.saveState('Fill', activeLayer);
-            return;
-        } */
 
         if (this.tool === 'fill') {
             const activeLayer = this.layerManager.getActiveLayer();
-            const imageData = activeLayer.getImageData();
-            const pixels = imageData.data;
-            const pos = (y * activeLayer.canvas.width + x) * 4;
-        
-            // boundary color — чёрный (#000000), можно сделать настраиваемым
-            const boundaryColor = '#000000';
-            const fillColor = this.color;
-        
-            this.boundaryFill(x, y, boundaryColor, fillColor);
-            this.layerManager.saveState('Boundary Fill', activeLayer);
+            this.floodFill(x, y, activeLayer, this.color);
+            this.layerManager.saveState('Fill', activeLayer);
             return;
         }
 
@@ -792,6 +1002,17 @@ class DrawingTool {
         this.lastY = y;
         this.hasDrawn = false;
         this.drawPixel(x, y, this.erasing);
+    }
+
+    drawBrushStroke(layer, x, y) {
+        const radius = 1;
+        for (let offsetY = -radius; offsetY <= radius; offsetY++) {
+            for (let offsetX = -radius; offsetX <= radius; offsetX++) {
+                if (offsetX * offsetX + offsetY * offsetY <= radius * radius + 0.2) {
+                    layer.drawPixel(x + offsetX, y + offsetY, this.color);
+                }
+            }
+        }
     }
 
     handleMouseMove(e) {
@@ -853,191 +1074,102 @@ class DrawingTool {
         }
     }
 
-    floodFill(x, y, targetColor, replacementColor) {
-        const activeLayer = this.layerManager.getActiveLayer();
+    floodFill(x, y, activeLayer, replacementColor) {
         if (!activeLayer || !activeLayer.visible || !activeLayer.ctx) return;
 
         const imageData = activeLayer.getImageData();
         const pixels = imageData.data;
-        const width = activeLayer.canvas.width;
-        const height = activeLayer.canvas.height;
+        const scaleFactor = activeLayer.scaleFactor;
+        const width = Math.floor(activeLayer.canvas.width / scaleFactor);
+        const height = Math.floor(activeLayer.canvas.height / scaleFactor);
+        const replacementRGBA = this.parseColorToRgba(replacementColor);
+        if (!replacementRGBA) return;
+        const targetRGBA = this.getCellColor(pixels, activeLayer.canvas.width, scaleFactor, x, y);
 
-        // Convert target color to RGB
-        const targetRGB = this.hexToRgb(targetColor);
-        const replacementRGB = this.hexToRgb(replacementColor);
+        if (this.rgbaEquals(targetRGBA, replacementRGBA)) return;
 
-        // If target color is the same as replacement color, no need to fill
-        if (targetColor === replacementColor) return;
-
-        // Color tolerance settings
-        const tolerance = {
-            r: 30,
-            g: 30,
-            b: 30,
-            a: 10
-        };
-
-        // Use a more efficient data structure for visited pixels
         const visited = new Uint8Array(width * height);
         const queue = [[x, y]];
         let queueIndex = 0;
 
-        // Function to get pixel color at position
-        const getPixelColor = (pos) => ({
-            r: pixels[pos],
-            g: pixels[pos + 1],
-            b: pixels[pos + 2],
-            a: pixels[pos + 3]
-        });
-
-        // Function to check if colors are similar within tolerance
-        const colorsAreSimilar = (color1, color2) => {
-            return Math.abs(color1.r - color2.r) <= tolerance.r &&
-                   Math.abs(color1.g - color2.g) <= tolerance.g &&
-                   Math.abs(color1.b - color2.b) <= tolerance.b &&
-                   Math.abs(color1.a - color2.a) <= tolerance.a;
-        };
-
-        // Function to check if a pixel is valid for filling
         const isValidPixel = (px, py) => {
             if (px < 0 || px >= width || py < 0 || py >= height) return false;
             const index = py * width + px;
             return !visited[index];
         };
 
-        // Get the color at the starting point
-        const startPos = (y * width + x) * 4;
-        const startColor = getPixelColor(startPos);
-
-        // If the starting point is transparent or already the target color, return
-        if (startColor.a === 0 || colorsAreSimilar(startColor, replacementRGB)) {
-            console.log('Starting point is not valid for filling');
-            return;
-        }
-
-        // Main flood fill loop using a queue for better performance
         while (queueIndex < queue.length) {
             const [currentX, currentY] = queue[queueIndex++];
-            const pos = (currentY * width + currentX) * 4;
             const index = currentY * width + currentX;
 
-            // Skip if already visited
             if (visited[index]) continue;
 
-            // Get current pixel color
-            const currentColor = getPixelColor(pos);
+            const currentColor = this.getCellColor(
+                pixels,
+                activeLayer.canvas.width,
+                scaleFactor,
+                currentX,
+                currentY
+            );
+            if (!this.rgbaEquals(currentColor, targetRGBA)) continue;
 
-            // Skip if color is too different from the starting color
-            if (!colorsAreSimilar(currentColor, startColor)) continue;
-
-            // Fill the current pixel
-            pixels[pos] = replacementRGB.r;
-            pixels[pos + 1] = replacementRGB.g;
-            pixels[pos + 2] = replacementRGB.b;
-            pixels[pos + 3] = replacementRGB.a || 255;
+            this.fillCellColor(
+                pixels,
+                activeLayer.canvas.width,
+                scaleFactor,
+                currentX,
+                currentY,
+                replacementRGBA
+            );
 
             visited[index] = 1;
 
-            // Check adjacent pixels in all 8 directions
             const directions = [
-                [1, 0],   // right
-                [-1, 0],  // left
-                [0, 1],   // down
-                [0, -1],  // up
-                [1, 1],   // down-right
-                [-1, 1],  // down-left
-                [1, -1],  // up-right
-                [-1, -1]  // up-left
+                [1, 0],
+                [-1, 0],
+                [0, 1],
+                [0, -1]
             ];
 
-            // Process directions in a more natural order
             for (const [dx, dy] of directions) {
                 const nx = currentX + dx;
                 const ny = currentY + dy;
                 
                 if (isValidPixel(nx, ny)) {
-                    const nPos = (ny * width + nx) * 4;
-                    const neighborColor = getPixelColor(nPos);
-                    
-                    // Only add to queue if the neighbor color is similar to the starting color
-                    if (colorsAreSimilar(neighborColor, startColor)) {
-                        queue.push([nx, ny]);
-                    }
+                    queue.push([nx, ny]);
                 }
             }
         }
 
-        // Apply the changes to the canvas
         activeLayer.putImageData(imageData);
     }
 
-    boundaryFill(x, y, boundaryHex, fillHex) {
-        const activeLayer = this.layerManager.getActiveLayer();
-        if (!activeLayer || !activeLayer.visible || !activeLayer.ctx) return;
-    
-        const imageData = activeLayer.getImageData();
-        const data = imageData.data;
-        const width = activeLayer.canvas.width;
-        const height = activeLayer.canvas.height;
-    
-        const getPos = (x, y) => (y * width + x) * 4;
-    
-        const hexToRGBA = (hex) => {
-            const bigint = parseInt(hex.slice(1), 16);
-            return {
-                r: (bigint >> 16) & 255,
-                g: (bigint >> 8) & 255,
-                b: bigint & 255,
-                a: 255
-            };
+    getCellColor(pixels, canvasWidth, scaleFactor, x, y) {
+        const sampleX = x * scaleFactor;
+        const sampleY = y * scaleFactor;
+        const pos = (sampleY * canvasWidth + sampleX) * 4;
+
+        return {
+            r: pixels[pos],
+            g: pixels[pos + 1],
+            b: pixels[pos + 2],
+            a: pixels[pos + 3]
         };
-    
-        const isSameColor = (pos, color) =>
-            data[pos] === color.r &&
-            data[pos + 1] === color.g &&
-            data[pos + 2] === color.b &&
-            data[pos + 3] === color.a;
-    
-        const boundary = hexToRGBA(boundaryHex);
-        const fill = hexToRGBA(fillHex);
-    
-        const visited = new Uint8Array(width * height);
-        const queue = [[x, y]];
-    
-        while (queue.length > 0) {
-            const [cx, cy] = queue.pop();
-            if (cx < 0 || cy < 0 || cx >= width || cy >= height) continue;
-    
-            const pos = getPos(cx, cy);
-            const index = cy * width + cx;
-    
-            if (visited[index]) continue;
-    
-            if (
-                isSameColor(pos, boundary) ||
-                isSameColor(pos, fill)
-            ) continue;
-    
-            // Fill the pixel
-            data[pos] = fill.r;
-            data[pos + 1] = fill.g;
-            data[pos + 2] = fill.b;
-            data[pos + 3] = fill.a;
-    
-            visited[index] = 1;
-    
-            // Add 8-connected neighbors
-            queue.push([cx + 1, cy]);
-            queue.push([cx - 1, cy]);
-            queue.push([cx, cy + 1]);
-            queue.push([cx, cy - 1]);
-            queue.push([cx + 1, cy + 1]);
-            queue.push([cx - 1, cy + 1]);
-            queue.push([cx + 1, cy - 1]);
-            queue.push([cx - 1, cy - 1]);
+    }
+
+    fillCellColor(pixels, canvasWidth, scaleFactor, x, y, color) {
+        const startX = x * scaleFactor;
+        const startY = y * scaleFactor;
+
+        for (let offsetY = 0; offsetY < scaleFactor; offsetY++) {
+            for (let offsetX = 0; offsetX < scaleFactor; offsetX++) {
+                const pos = ((startY + offsetY) * canvasWidth + startX + offsetX) * 4;
+                pixels[pos] = color.r;
+                pixels[pos + 1] = color.g;
+                pixels[pos + 2] = color.b;
+                pixels[pos + 3] = color.a;
+            }
         }
-    
-        activeLayer.putImageData(imageData);
     }
 
     hexToRgb(hex) {
@@ -1047,6 +1179,59 @@ class DrawingTool {
             g: parseInt(result[2], 16),
             b: parseInt(result[3], 16)
         } : null;
+    }
+
+    hexToRgba(hex) {
+        const rgb = this.hexToRgb(hex);
+        return rgb ? { ...rgb, a: 255 } : null;
+    }
+
+    parseColorToRgba(color) {
+        if (typeof color !== 'string') return null;
+
+        const hexColor = this.hexToRgba(color);
+        if (hexColor) return hexColor;
+
+        const normalized = color.trim().toLowerCase();
+        if (!normalized.startsWith('rgb(') && !normalized.startsWith('rgba(')) {
+            return null;
+        }
+
+        const start = normalized.indexOf('(');
+        const end = normalized.lastIndexOf(')');
+        if (start === -1 || end === -1 || end <= start + 1) {
+            return null;
+        }
+
+        const parts = normalized.slice(start + 1, end).split(',').map(part => part.trim());
+        if (parts.length < 3 || parts.length > 4) {
+            return null;
+        }
+
+        const [r, g, b, alpha = '1'] = parts;
+        const alphaValue = Number(alpha);
+
+        return {
+            r: this.clampChannel(Number(r)),
+            g: this.clampChannel(Number(g)),
+            b: this.clampChannel(Number(b)),
+            a: this.clampAlpha(alphaValue <= 1 ? Math.round(alphaValue * 255) : alphaValue)
+        };
+    }
+
+    rgbaEquals(colorA, colorB) {
+        return colorA.r === colorB.r &&
+            colorA.g === colorB.g &&
+            colorA.b === colorB.b &&
+            colorA.a === colorB.a;
+    }
+
+    clampChannel(value) {
+        return Math.min(255, Math.max(0, Math.round(value)));
+    }
+
+    clampAlpha(value) {
+        return Math.min(255, Math.max(0, Math.round(value)));
     }
 
     rgbToHex(r, g, b) {
@@ -1068,61 +1253,381 @@ class ColorPaletteManager {
         this.paletteSelector = paletteSelector;
         this.callback = callback;
         this.defaultColors = [
-            '#000000', '#DDDDDD', '#FF0000', '#00FF00', '#0000FF',
-            '#FFFF00', '#FF00FF', '#00FFFF', '#2277BB', '#E74C3C'
+            { r: 0, g: 0, b: 0, a: 255 },
+            { r: 221, g: 221, b: 221, a: 255 },
+            { r: 255, g: 0, b: 0, a: 255 },
+            { r: 0, g: 255, b: 0, a: 255 },
+            { r: 0, g: 0, b: 255, a: 255 },
+            { r: 255, g: 255, b: 0, a: 255 },
+            { r: 255, g: 0, b: 255, a: 255 },
+            { r: 0, g: 255, b: 255, a: 255 },
+            { r: 34, g: 119, b: 187, a: 255 },
+            { r: 231, g: 76, b: 60, a: 255 }
         ];
         this.activeIndex = 0;
+        this.colorModal = document.getElementById('color-edit-modal');
+        this.colorSurface = document.getElementById('color-surface');
+        this.colorSurfaceCursor = document.getElementById('color-surface-cursor');
+        this.hueInput = document.getElementById('color-hue');
+        this.alphaInput = document.getElementById('color-alpha');
+        this.hexInput = document.getElementById('color-hex');
+        this.alphaNumberInput = document.getElementById('color-alpha-input');
+        this.opacityNumberInput = document.getElementById('color-opacity-input');
+        this.rInput = document.getElementById('color-r');
+        this.gInput = document.getElementById('color-g');
+        this.bInput = document.getElementById('color-b');
+        this.currentPreview = document.getElementById('color-preview-current');
+        this.nextPreview = document.getElementById('color-preview-next');
+        this.editingIndex = null;
+        this.currentEditColor = null;
+        this.originalEditColor = null;
+        this.isDraggingSurface = false;
+        this.isUpdatingControls = false;
         this.init();
     }
 
     init() {
-        let colors = JSON.parse(localStorage.getItem('paletteColors')) || this.defaultColors;
-        localStorage.setItem('paletteColors', JSON.stringify(colors));
+        let colors = this.normalizeStoredColors(JSON.parse(localStorage.getItem('paletteColors')));
+        this.colors = colors;
+        this.persistColors();
 
         for (let i = 0; i < 10; i++) {
             const picker = document.getElementById(`${this.paletteSelector}-${i}`);
-            picker.value = colors[i];
+            this.renderPicker(picker, colors[i]);
             if (i === 0) picker.classList.add('active');
 
             this.setupPickerListeners(picker, i, colors);
         }
 
-        this.callback(colors[0]);
+        this.setupColorModalListeners();
+        this.callback(this.toCssColor(colors[0]));
     }
 
-    setupPickerListeners(picker, index, colors) {
-        // Handle color change
-        picker.addEventListener('change', e => {
-            colors[index] = e.target.value;
-            localStorage.setItem('paletteColors', JSON.stringify(colors));
-            if (index === this.activeIndex) {
-                this.callback(e.target.value);
-            }
-        });
+    setupColorModalListeners() {
+        const closeModal = () => {
+            this.colorModal.classList.remove('show');
+            this.editingIndex = null;
+            this.originalEditColor = null;
+            this.currentEditColor = null;
+        };
 
-        // Handle click for color selection
-        picker.addEventListener('click', e => {
-            // If it's a right click, let the default behavior happen (showing color picker)
-            if (e.button === 2) {
+        this.colorModal.querySelector('.close-modal').onclick = closeModal;
+        document.getElementById('cancel-color-edit').onclick = closeModal;
+        this.colorModal.onclick = e => {
+            if (e.target === this.colorModal) {
+                closeModal();
+            }
+        };
+
+        document.getElementById('save-color-edit').onclick = () => {
+            if (this.editingIndex === null) {
+                closeModal();
                 return;
             }
 
-            // For left click, prevent default and select color
-            e.preventDefault();
-            document.querySelectorAll('.color-picker').forEach(p => p.classList.remove('active'));
-            picker.classList.add('active');
-            this.activeIndex = index;
-            this.callback(picker.value);
+            const picker = document.getElementById(`${this.paletteSelector}-${this.editingIndex}`);
+            const nextColor = this.cloneColor(this.currentEditColor);
+            this.colors[this.editingIndex] = nextColor;
+            this.renderPicker(picker, nextColor);
+            this.persistColors();
+
+            if (this.editingIndex === this.activeIndex) {
+                this.callback(this.toCssColor(nextColor));
+            }
+
+            closeModal();
+        };
+
+        this.setupColorSurfaceInteractions();
+        this.hueInput.oninput = () => {
+            if (!this.currentEditColor) return;
+            const hsv = this.rgbToHsv(this.currentEditColor);
+            const next = this.hsvToRgb(Number(this.hueInput.value), hsv.s, hsv.v);
+            this.currentEditColor = { ...this.currentEditColor, ...next };
+            this.syncColorModalFromState('surface');
+        };
+
+        this.alphaInput.oninput = () => {
+            if (!this.currentEditColor) return;
+            this.currentEditColor.a = Math.round((Number(this.alphaInput.value) / 100) * 255);
+            this.syncColorModalFromState();
+        };
+
+        this.hexInput.oninput = () => {
+            const parsed = this.parseHex(this.hexInput.value);
+            if (!parsed || !this.currentEditColor) return;
+            this.currentEditColor = { ...this.currentEditColor, ...parsed };
+            this.syncColorModalFromState('rgb');
+        };
+
+        [this.rInput, this.gInput, this.bInput].forEach((input, channelIndex) => {
+            input.oninput = () => {
+                if (!this.currentEditColor || this.isUpdatingControls) return;
+                const channelNames = ['r', 'g', 'b'];
+                const channel = channelNames[channelIndex];
+                this.currentEditColor[channel] = this.clamp(Number(input.value), 0, 255);
+                this.syncColorModalFromState('rgb');
+            };
         });
 
-        // Handle right click to show color picker
-        picker.addEventListener('contextmenu', e => {
+        this.alphaNumberInput.oninput = () => {
+            if (!this.currentEditColor || this.isUpdatingControls) return;
+            this.currentEditColor.a = this.clamp(Number(this.alphaNumberInput.value), 0, 255);
+            this.syncColorModalFromState();
+        };
+
+        this.opacityNumberInput.oninput = () => {
+            if (!this.currentEditColor || this.isUpdatingControls) return;
+            const alpha = Math.round((this.clamp(Number(this.opacityNumberInput.value), 0, 100) / 100) * 255);
+            this.currentEditColor.a = alpha;
+            this.syncColorModalFromState();
+        };
+    }
+
+    setActiveColor(index) {
+        const picker = document.getElementById(`${this.paletteSelector}-${index}`);
+        document.querySelectorAll('.color-picker').forEach(colorPicker => colorPicker.classList.remove('active'));
+        picker.classList.add('active');
+        this.activeIndex = index;
+        this.callback(this.toCssColor(this.colors[index]));
+    }
+
+    openColorModal(index) {
+        this.editingIndex = index;
+        this.setActiveColor(index);
+        this.originalEditColor = this.cloneColor(this.colors[index]);
+        this.currentEditColor = this.cloneColor(this.colors[index]);
+        this.syncColorModalFromState();
+        this.colorModal.classList.add('show');
+    }
+
+    setupPickerListeners(picker, index, colors) {
+        picker.onmousedown = e => {
+            if (e.button === 0) {
+                e.preventDefault();
+            }
+        };
+
+        picker.onchange = e => {
+            const parsed = this.parseHex(e.target.value);
+            if (!parsed) return;
+            colors[index] = { ...colors[index], ...parsed };
+            this.renderPicker(picker, colors[index]);
+            this.persistColors();
+            if (index === this.activeIndex) {
+                this.callback(this.toCssColor(colors[index]));
+            }
+        };
+
+        picker.onclick = e => {
             e.preventDefault();
-            picker.showPicker();
+            this.setActiveColor(index);
+        };
+
+        picker.oncontextmenu = e => {
+            e.preventDefault();
+            this.openColorModal(index);
+        };
+
+        picker.ondblclick = e => {
+            e.preventDefault();
+            this.openColorModal(index);
+        };
+    }
+
+    setCallback(callback) {
+        this.callback = callback;
+        const activeColor = this.colors[this.activeIndex];
+        if (activeColor) {
+            this.callback(this.toCssColor(activeColor));
+        }
+    }
+
+    setupColorSurfaceInteractions() {
+        const updateFromPointer = e => {
+            if (!this.currentEditColor) return;
+            const rect = this.colorSurface.getBoundingClientRect();
+            const x = this.clamp(e.clientX - rect.left, 0, rect.width);
+            const y = this.clamp(e.clientY - rect.top, 0, rect.height);
+            const saturation = rect.width === 0 ? 0 : x / rect.width;
+            const value = rect.height === 0 ? 0 : 1 - (y / rect.height);
+            const hue = Number(this.hueInput.value);
+            const nextRgb = this.hsvToRgb(hue, saturation, value);
+            this.currentEditColor = { ...this.currentEditColor, ...nextRgb };
+            this.syncColorModalFromState('surface');
+        };
+
+        this.colorSurface.onmousedown = e => {
+            this.isDraggingSurface = true;
+            updateFromPointer(e);
+        };
+
+        window.addEventListener('mousemove', e => {
+            if (!this.isDraggingSurface) return;
+            updateFromPointer(e);
         });
 
-        // Prevent double click from opening color picker
-        picker.addEventListener('dblclick', e => e.preventDefault());
+        window.addEventListener('mouseup', () => {
+            this.isDraggingSurface = false;
+        });
+    }
+
+    syncColorModalFromState(source = 'all') {
+        if (!this.currentEditColor) return;
+
+        this.isUpdatingControls = true;
+        const { r, g, b, a } = this.currentEditColor;
+        const hsv = this.rgbToHsv(this.currentEditColor);
+
+        if (source !== 'surface') {
+            this.hueInput.value = String(Math.round(hsv.h));
+        }
+
+        this.colorSurface.style.backgroundImage = [
+            'linear-gradient(to top, black, transparent)',
+            `linear-gradient(to right, white, hsl(${Math.round(hsv.h)} 100% 50%))`
+        ].join(', ');
+
+        this.colorSurfaceCursor.style.left = `${hsv.s * 100}%`;
+        this.colorSurfaceCursor.style.top = `${(1 - hsv.v) * 100}%`;
+        this.alphaInput.value = String(Math.round((a / 255) * 100));
+        this.alphaInput.style.background = `linear-gradient(90deg, rgba(${r}, ${g}, ${b}, 0), rgba(${r}, ${g}, ${b}, 1))`;
+        this.hexInput.value = this.rgbToHex(r, g, b);
+        this.rInput.value = String(r);
+        this.gInput.value = String(g);
+        this.bInput.value = String(b);
+        this.alphaNumberInput.value = String(a);
+        this.opacityNumberInput.value = String(Math.round((a / 255) * 100));
+        this.currentPreview.style.setProperty('--preview-color', this.toCssColor(this.originalEditColor || this.currentEditColor));
+        this.nextPreview.style.setProperty('--preview-color', this.toCssColor(this.currentEditColor));
+        this.isUpdatingControls = false;
+    }
+
+    renderPicker(picker, color) {
+        picker.value = this.rgbToHex(color.r, color.g, color.b);
+        picker.style.opacity = `${Math.max(0.25, color.a / 255)}`;
+        picker.title = `${this.rgbToHex(color.r, color.g, color.b)} · ${Math.round((color.a / 255) * 100)}%`;
+    }
+
+    persistColors() {
+        localStorage.setItem('paletteColors', JSON.stringify(this.colors));
+    }
+
+    normalizeStoredColors(storedColors) {
+        if (!Array.isArray(storedColors) || storedColors.length !== 10) {
+            return this.defaultColors.map(color => ({ ...color }));
+        }
+
+        return storedColors.map((color, index) => {
+            if (typeof color === 'string') {
+                const parsed = this.parseHex(color);
+                return parsed ? { ...parsed, a: 255 } : { ...this.defaultColors[index] };
+            }
+
+            if (color && typeof color === 'object') {
+                return {
+                    r: this.clamp(Number(color.r), 0, 255),
+                    g: this.clamp(Number(color.g), 0, 255),
+                    b: this.clamp(Number(color.b), 0, 255),
+                    a: this.clamp(color.a ?? 255, 0, 255)
+                };
+            }
+
+            return { ...this.defaultColors[index] };
+        });
+    }
+
+    parseHex(hex) {
+        const match = /^#?([a-f\d]{6})$/i.exec((hex || '').trim());
+        if (!match) return null;
+        const value = match[1];
+        return {
+            r: parseInt(value.slice(0, 2), 16),
+            g: parseInt(value.slice(2, 4), 16),
+            b: parseInt(value.slice(4, 6), 16)
+        };
+    }
+
+    rgbToHex(r, g, b) {
+        return `#${[r, g, b].map(value => this.clamp(Math.round(value), 0, 255).toString(16).padStart(2, '0')).join('')}`;
+    }
+
+    toCssColor(color) {
+        const safeColor = color || { r: 0, g: 0, b: 0, a: 255 };
+        return `rgba(${safeColor.r}, ${safeColor.g}, ${safeColor.b}, ${(safeColor.a / 255).toFixed(3)})`;
+    }
+
+    rgbToHsv(color) {
+        const r = color.r / 255;
+        const g = color.g / 255;
+        const b = color.b / 255;
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const delta = max - min;
+        let hue = 0;
+
+        if (delta !== 0) {
+            if (max === r) {
+                hue = 60 * (((g - b) / delta) % 6);
+            } else if (max === g) {
+                hue = 60 * (((b - r) / delta) + 2);
+            } else {
+                hue = 60 * (((r - g) / delta) + 4);
+            }
+        }
+
+        if (hue < 0) hue += 360;
+
+        return {
+            h: hue,
+            s: max === 0 ? 0 : delta / max,
+            v: max
+        };
+    }
+
+    hsvToRgb(h, s, v) {
+        const chroma = v * s;
+        const huePrime = (h % 360) / 60;
+        const second = chroma * (1 - Math.abs((huePrime % 2) - 1));
+        let r1 = 0;
+        let g1 = 0;
+        let b1 = 0;
+
+        if (huePrime >= 0 && huePrime < 1) {
+            r1 = chroma;
+            g1 = second;
+        } else if (huePrime < 2) {
+            r1 = second;
+            g1 = chroma;
+        } else if (huePrime < 3) {
+            g1 = chroma;
+            b1 = second;
+        } else if (huePrime < 4) {
+            g1 = second;
+            b1 = chroma;
+        } else if (huePrime < 5) {
+            r1 = second;
+            b1 = chroma;
+        } else {
+            r1 = chroma;
+            b1 = second;
+        }
+
+        const match = v - chroma;
+        return {
+            r: Math.round((r1 + match) * 255),
+            g: Math.round((g1 + match) * 255),
+            b: Math.round((b1 + match) * 255)
+        };
+    }
+
+    cloneColor(color) {
+        return { ...color };
+    }
+
+    clamp(value, min, max) {
+        if (Number.isNaN(value)) return min;
+        return Math.min(max, Math.max(min, Math.round(value)));
     }
 }
 
@@ -1131,21 +1636,30 @@ class ColorPaletteManager {
  */
 class App {
     constructor() {
-        this.config = null;
+        this.defaultConfig = {
+            scaleFactor: 10,
+            canvasSize: [350, 350]
+        };
+        this.config = { ...this.defaultConfig, canvasSize: [...this.defaultConfig.canvasSize] };
+        this.resizeAnchor = 'middle-center';
         this.container = null;
         this.wrapper = null;
         this.controller = null;
         this.layerManager = null;
         this.tool = null;
         this.palette = null;
-        
+        this.configElements = this.getConfigElements();
+
+        this.setupConfigModal(this.configElements);
+        this.initToolSelection();
+        this.initKeyboardShortcuts();
+        this.palette = new ColorPaletteManager('color-picker', color => this.tool?.setColor(color));
         this.showConfigModal();
     }
 
     showConfigModal() {
-        const configElements = this.getConfigElements();
-        this.setupConfigModal(configElements);
-        configElements.modal.classList.add('show');
+        this.resetConfigInputs(this.configElements);
+        this.configElements.modal.classList.add('show');
     }
 
     initialize(config) {
@@ -1157,17 +1671,21 @@ class App {
 
     setupContainer() {
         this.container = document.querySelector('.canvas-container');
-        this.wrapper = document.createElement('div');
-        this.wrapper.className = 'canvas-wrapper';
-        this.container.appendChild(this.wrapper);
+        this.wrapper = this.container.querySelector('.canvas-wrapper');
+
+        if (!this.wrapper) {
+            this.wrapper = document.createElement('div');
+            this.wrapper.className = 'canvas-wrapper';
+            this.container.appendChild(this.wrapper);
+        }
     }
 
     initComponents() {
+        this.controller?.destroy();
         this.controller = new CanvasController(this.wrapper, this.container);
         this.layerManager.drawGridlines();
         this.tool = new DrawingTool(this.layerManager, this.config.scaleFactor, this.container, this.controller);
-        this.palette = new ColorPaletteManager('color-picker', color => this.tool.setColor(color));
-        this.initToolSelection();
+        this.palette.setCallback(color => this.tool.setColor(color));
     }
 
     initToolSelection() {
@@ -1180,14 +1698,14 @@ class App {
 
         Object.entries(tools).forEach(([tool, button]) => {
             if (button) {
-                button.addEventListener('click', () => {
+                button.onclick = () => {
                     // Remove active class from all tools
                     Object.values(tools).forEach(btn => btn?.classList.remove('active'));
                     // Add active class to selected tool
                     button.classList.add('active');
                     // Set the tool
-                    this.tool.setTool(tool);
-                });
+                    this.tool?.setTool(tool);
+                };
             }
         });
     }
@@ -1200,8 +1718,6 @@ class App {
     }
 
     cleanupExistingCanvases() {
-        const existingDrawableCanvases = this.wrapper.querySelectorAll('canvas[data-canvas-type="drawable"]');
-        existingDrawableCanvases.forEach(canvas => canvas.remove());
         this.wrapper.innerHTML = '';
     }
 
@@ -1245,6 +1761,7 @@ class App {
             pixelSize: document.getElementById('pixel-size'),
             canvasWidth: document.getElementById('canvas-width'),
             canvasHeight: document.getElementById('canvas-height'),
+            resizeAnchor: document.getElementById('resize-anchor'),
             saveButton: document.getElementById('save-config'),
             cancelButton: document.getElementById('cancel-config'),
             closeButton: document.getElementById('config-modal').querySelector('.close-modal')
@@ -1253,47 +1770,89 @@ class App {
 
     setupConfigModal(elements) {
         this.setInitialConfigValues(elements);
+        this.setupAnchorSelection(elements.resizeAnchor);
         this.setupConfigEventListeners(elements);
     }
 
+    setupAnchorSelection(anchorGrid) {
+        if (!anchorGrid || anchorGrid.dataset.initialized === 'true') return;
+
+        anchorGrid.dataset.initialized = 'true';
+        anchorGrid.querySelectorAll('.anchor-point').forEach(button => {
+            button.onclick = () => {
+                this.resizeAnchor = button.dataset.anchor || 'middle-center';
+                this.syncAnchorSelection(anchorGrid);
+            };
+        });
+    }
+
+    syncAnchorSelection(anchorGrid) {
+        if (!anchorGrid) return;
+
+        anchorGrid.querySelectorAll('.anchor-point').forEach(button => {
+            button.classList.toggle('active', button.dataset.anchor === this.resizeAnchor);
+        });
+    }
+
     setInitialConfigValues(elements) {
-        elements.pixelSize.value = '10';
-        elements.canvasWidth.value = '350';
-        elements.canvasHeight.value = '350';
+        elements.pixelSize.value = String(this.defaultConfig.scaleFactor);
+        elements.canvasWidth.value = String(this.defaultConfig.canvasSize[0]);
+        elements.canvasHeight.value = String(this.defaultConfig.canvasSize[1]);
     }
 
     setupConfigEventListeners(elements) {
-        elements.button.addEventListener('click', () => elements.modal.classList.add('show'));
+        elements.button.onclick = () => {
+            this.resetConfigInputs(elements);
+            elements.modal.classList.add('show');
+        };
 
         const closeModal = () => {
             elements.modal.classList.remove('show');
             this.resetConfigInputs(elements);
         };
 
-        elements.closeButton.addEventListener('click', closeModal);
-        elements.cancelButton.addEventListener('click', closeModal);
-        elements.modal.addEventListener('click', e => {
+        elements.closeButton.onclick = closeModal;
+        elements.cancelButton.onclick = closeModal;
+        elements.modal.onclick = e => {
             if (e.target === elements.modal) closeModal();
-        });
+        };
 
-        elements.saveButton.addEventListener('click', () => this.handleConfigSave(elements));
+        elements.saveButton.onclick = () => this.handleConfigSave(elements);
     }
 
     resetConfigInputs(elements) {
-        elements.pixelSize.value = '10';
-        elements.canvasWidth.value = '350';
-        elements.canvasHeight.value = '350';
+        const [width, height] = this.config.canvasSize;
+        elements.pixelSize.value = String(this.config.scaleFactor);
+        elements.canvasWidth.value = String(width);
+        elements.canvasHeight.value = String(height);
+        this.syncAnchorSelection(elements.resizeAnchor);
     }
 
     handleConfigSave(elements) {
         const newConfig = this.validateConfigInputs(elements);
         if (!newConfig) return;
 
+        const sizeChanged = !this.config ||
+            this.config.scaleFactor !== newConfig.newScaleFactor ||
+            this.config.canvasSize[0] !== newConfig.newWidth ||
+            this.config.canvasSize[1] !== newConfig.newHeight;
+        const artworkSnapshot = this.layerManager && sizeChanged
+            ? this.layerManager.captureArtworkSnapshot()
+            : null;
+
         elements.modal.classList.remove('show');
+        if (this.layerManager && !sizeChanged) {
+            return;
+        }
+
         this.initialize({
             scaleFactor: newConfig.newScaleFactor,
             canvasSize: [newConfig.newWidth, newConfig.newHeight]
         });
+
+        if (artworkSnapshot) {
+            this.layerManager.restoreArtworkSnapshot(artworkSnapshot, this.resizeAnchor);
+        }
     }
 
     validateConfigInputs(elements) {
@@ -1312,6 +1871,42 @@ class App {
         }
 
         return { newScaleFactor, newWidth, newHeight };
+    }
+
+    initKeyboardShortcuts() {
+        document.addEventListener('keydown', e => {
+            const target = e.target;
+            const isTyping = target instanceof HTMLElement &&
+                (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+            if (isTyping) return;
+
+            if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+                e.preventDefault();
+                document.getElementById('undo')?.click();
+                return;
+            }
+
+            if (
+                (e.ctrlKey || e.metaKey) &&
+                (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))
+            ) {
+                e.preventDefault();
+                document.getElementById('redo')?.click();
+                return;
+            }
+
+            const toolMap = {
+                b: 'brush',
+                p: 'pencil',
+                e: 'eraser',
+                g: 'fill'
+            };
+
+            const toolId = toolMap[e.key.toLowerCase()];
+            if (toolId) {
+                document.getElementById(toolId)?.click();
+            }
+        });
     }
 }
 
