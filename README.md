@@ -1,5 +1,9 @@
 # Pixetch - Free Pixel Art Editor
 
+<p align="center">
+  <img src="./promo.jpg" alt="CartDeck user interface preview" width="920" />
+</p>
+
 Pixetch is a free, open-source pixel art editor that allows you to create pixel art directly in your browser. Whether you're a professional artist or just starting out, Pixetch provides all the essential tools you need to create pixel art.
 
 ## Features
@@ -13,9 +17,6 @@ Pixetch is a free, open-source pixel art editor that allows you to create pixel 
 - **History Panel**: Track your changes and revert to previous states
 
 ## Usage
-
-### Online Version
-Visit [pixetch.k3i.pro](https://pixetch.k3i.pro) to start creating pixel art right away in your browser.
 
 ### Local Installation
 1. Clone this repository
